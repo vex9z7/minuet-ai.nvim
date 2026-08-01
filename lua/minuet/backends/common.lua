@@ -44,6 +44,7 @@ end
 
 ---@class minuet.JobHandlers
 ---@field on_exit fun(job: vim.SystemObj, result: vim.SystemCompleted)
+---@field on_stdout? fun(job: vim.SystemObj, data: string)
 ---@field on_spawn_error? fun()
 
 ---@param command string
@@ -56,13 +57,40 @@ function M.start_job(command, args, handlers)
 
     ---@type vim.SystemObj?
     local job
+    local stdout_chunks = {}
+    local pending_stdout = {}
+    local system_opts = { text = true }
+
+    if handlers.on_stdout then
+        system_opts.stdout = vim.schedule_wrap(function(err, data)
+            if err then
+                utils.notify('Completion stdout error: ' .. tostring(err), 'debug')
+                return
+            end
+            if not data or data == '' then
+                return
+            end
+
+            table.insert(stdout_chunks, data)
+            if job then
+                handlers.on_stdout(job, data)
+            else
+                table.insert(pending_stdout, data)
+            end
+        end)
+    end
+
     local ok, result = pcall(
         vim.system,
         cmd,
-        { text = true },
+        system_opts,
         vim.schedule_wrap(function(out)
             if not job then
                 return
+            end
+
+            if handlers.on_stdout then
+                out.stdout = table.concat(stdout_chunks)
             end
 
             M.remove_job(job)
@@ -80,6 +108,13 @@ function M.start_job(command, args, handlers)
 
     job = result
     M.register_job(job)
+
+    if handlers.on_stdout and #pending_stdout > 0 then
+        for _, data in ipairs(pending_stdout) do
+            handlers.on_stdout(job, data)
+        end
+        pending_stdout = {}
+    end
 
     return job
 end

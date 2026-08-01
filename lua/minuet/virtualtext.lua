@@ -248,11 +248,12 @@ local function trigger(bufnr)
     local timestamp = uv.now()
     internal.current_completion_timestamp = timestamp
 
-    provider.complete(context, function(data)
+    local function apply_suggestions(data, is_partial)
         if timestamp ~= internal.current_completion_timestamp then
             if data and next(data) then
-                -- Notify if outdated (and non-empty) completion items arrive
-                utils.notify('Completion items arrived, but too late, aborted', 'debug', 'info')
+                local message = is_partial and 'Streaming completion items arrived, but too late, aborted'
+                    or 'Completion items arrived, but too late, aborted'
+                utils.notify(message, 'debug', 'info')
             end
             return
         end
@@ -261,14 +262,19 @@ local function trigger(bufnr)
         local ctx = get_ctx()
 
         if next(data) then
+            local previous_choice = ctx.choice or 1
             ctx.suggestions = data
-            if not ctx.choice then
-                ctx.choice = 1
-            end
-            ctx.shown_choices = {}
+            ctx.choice = math.min(previous_choice, #data)
+            ctx.shown_choices = ctx.shown_choices or {}
         end
 
         update_preview(ctx)
+    end
+
+    provider.complete(context, function(data)
+        apply_suggestions(data, false)
+    end, function(data)
+        apply_suggestions(data, true)
     end)
 end
 
