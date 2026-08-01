@@ -100,6 +100,7 @@ end
 ---@field choice? integer
 ---@field shown_choices? table<string, true>
 ---@field last_pos integer[]
+---@field is_pending? boolean
 
 ---@param ctx minuet.VirtualtextSuggestionContext
 local function reset_ctx(ctx)
@@ -107,6 +108,7 @@ local function reset_ctx(ctx)
     ctx.choice = nil
     ctx.shown_choices = nil
     ctx.last_pos = nil
+    ctx.is_pending = nil
 end
 
 local function stop_timer()
@@ -238,6 +240,11 @@ local function trigger(bufnr)
         return
     end
 
+    local ctx = get_ctx(bufnr)
+    if ctx.is_pending then
+        return
+    end
+
     utils.notify('Minuet virtual text started', 'verbose')
 
     local config = require('minuet').config
@@ -247,6 +254,7 @@ local function trigger(bufnr)
     local provider = require('minuet.backends.' .. config.provider)
     local timestamp = uv.now()
     internal.current_completion_timestamp = timestamp
+    ctx.is_pending = true
 
     local function apply_suggestions(data, is_partial)
         if timestamp ~= internal.current_completion_timestamp then
@@ -260,6 +268,10 @@ local function trigger(bufnr)
 
         data = utils.list_dedup(data or {})
         local ctx = get_ctx()
+
+        if not is_partial then
+            ctx.is_pending = nil
+        end
 
         if next(data) then
             local previous_choice = ctx.choice or 1
@@ -292,20 +304,22 @@ local function advance(count, ctx)
 end
 
 local function schedule()
-    if internal.is_on_throttle then
+    local bufnr = api.nvim_get_current_buf()
+    local ctx = get_ctx(bufnr)
+    if internal.is_on_throttle or ctx.is_pending then
         return
     end
 
     stop_timer()
 
     local config = require('minuet').config
-    local bufnr = api.nvim_get_current_buf()
 
     internal.timer = vim.defer_fn(function()
         local show_on_completion_menu = require('minuet').config.virtualtext.show_on_completion_menu
 
         if
             internal.is_on_throttle
+            or ctx.is_pending
             or (not show_on_completion_menu and completion_menu_visible())
             or (not utils.run_hooks_until_failure(config.enable_predicates))
         then
@@ -328,6 +342,10 @@ action.next = function()
 
     -- no suggestion request yet
     if not ctx.suggestions then
+        if ctx.is_pending then
+            return
+        end
+
         trigger(api.nvim_get_current_buf())
         return
     end
@@ -340,6 +358,10 @@ action.prev = function()
 
     -- no suggestion request yet
     if not ctx.suggestions then
+        if ctx.is_pending then
+            return
+        end
+
         trigger(api.nvim_get_current_buf())
         return
     end
@@ -439,6 +461,14 @@ end
 
 function action.is_visible()
     return not not api.nvim_buf_get_extmark_by_id(0, internal.ns_id, internal.extmark_id, { details = false })[1]
+end
+
+function action.has_suggestion()
+    return get_current_suggestion() ~= nil
+end
+
+function action.is_active()
+    return get_ctx().is_pending or action.is_visible()
 end
 
 function action.disable_auto_trigger()
