@@ -10,7 +10,7 @@ function M.openai_get_text_fn_stream(json)
     return json.choices[1].delta.content
 end
 
-local function decode_stream_lines(text, get_text_fn)
+local function decode_stream_lines(text)
     local result = {}
     local lines = vim.split(text or '', '\n', { plain = true, trimempty = false })
 
@@ -21,13 +21,15 @@ local function decode_stream_lines(text, get_text_fn)
         end
 
         local ok, json = pcall(vim.json.decode, line)
-        if not ok then
+        if not ok or not json.choices then
             goto continue
         end
 
-        local text_ok, delta = pcall(get_text_fn, json)
-        if text_ok and type(delta) == 'string' and delta ~= '' then
-            table.insert(result, delta)
+        for _, choice in ipairs(json.choices) do
+            local delta = choice.delta and choice.delta.content
+            if type(delta) == 'string' and delta ~= '' then
+                table.insert(result, { index = choice.index or 0, text = delta })
+            end
         end
 
         ::continue::
@@ -36,7 +38,7 @@ local function decode_stream_lines(text, get_text_fn)
     return result
 end
 
-local function make_stream_parser(get_text_fn, on_text)
+local function make_stream_parser(on_delta)
     local pending = ''
 
     return function(chunk)
@@ -48,9 +50,8 @@ local function make_stream_parser(get_text_fn, on_text)
         end
         pending = rest
 
-        local deltas = decode_stream_lines(complete, get_text_fn)
-        if #deltas > 0 then
-            on_text(table.concat(deltas))
+        for _, delta in ipairs(decode_stream_lines(complete)) do
+            on_delta(delta.index, delta.text)
         end
     end
 end
@@ -63,6 +64,19 @@ local function prepare_chat_items(items_raw, context, provider_name)
     local items = common.parse_completion_items(items_raw, provider_name)
     items = common.filter_context_sequences_in_items(items, context)
     items = utils.trim_completion_items(items)
+
+    return items
+end
+
+local function prepare_indexed_chat_items(raw_by_index, context, provider_name)
+    local items = {}
+    local indexes = vim.tbl_keys(raw_by_index)
+    table.sort(indexes)
+
+    for _, index in ipairs(indexes) do
+        local parsed = prepare_chat_items(raw_by_index[index], context, provider_name)
+        vim.list_extend(items, parsed or {})
+    end
 
     return items
 end
@@ -127,15 +141,17 @@ function M.complete_openai_base(options, context, callback, on_partial)
         timestamp = timestamp,
     })
 
-    local partial_raw = ''
+    local stream_raw_by_index = {}
     local parse_stream_chunk
 
-    if options.stream and on_partial then
-        parse_stream_chunk = make_stream_parser(M.openai_get_text_fn_stream, function(text)
-            partial_raw = partial_raw .. text
-            local items = prepare_chat_items(partial_raw, context, options.name)
-            if items and next(items) then
-                on_partial(items)
+    if options.stream then
+        parse_stream_chunk = make_stream_parser(function(index, text)
+            stream_raw_by_index[index] = (stream_raw_by_index[index] or '') .. text
+            if on_partial then
+                local items = prepare_indexed_chat_items(stream_raw_by_index, context, options.name)
+                if items and next(items) then
+                    on_partial(items)
+                end
             end
         end)
     end
@@ -156,13 +172,26 @@ function M.complete_openai_base(options, context, callback, on_partial)
 
             local items_raw
 
+            local items
+
             if options.stream then
-                items_raw = utils.stream_decode(result, data_file, options.name, M.openai_get_text_fn_stream)
+                -- Reuse the incrementally parsed stream buckets so multi-choice
+                -- streaming responses remain separate completion candidates.
+                os.remove(data_file)
+                if not (result.code == 28 or result.code == 0) then
+                    utils.notify(
+                        string.format('Request failed with exit code %d', result.code),
+                        'error',
+                        vim.log.levels.ERROR
+                    )
+                else
+                    items = prepare_indexed_chat_items(stream_raw_by_index, context, options.name)
+                end
             else
                 items_raw = utils.no_stream_decode(result, data_file, options.name, M.openai_get_text_fn_no_stream)
+                items = prepare_chat_items(items_raw, context, options.name)
             end
 
-            local items = prepare_chat_items(items_raw, context, options.name)
             if not items then
                 callback()
                 return
