@@ -10,6 +10,63 @@ function M.openai_get_text_fn_stream(json)
     return json.choices[1].delta.content
 end
 
+local function decode_stream_lines(text, get_text_fn)
+    local result = {}
+    local lines = vim.split(text or '', '\n', { plain = true, trimempty = false })
+
+    for _, line in ipairs(lines) do
+        line = line:gsub('\r$', ''):gsub('^data:%s*', '')
+        if line == '' or line == '[DONE]' then
+            goto continue
+        end
+
+        local ok, json = pcall(vim.json.decode, line)
+        if not ok then
+            goto continue
+        end
+
+        local text_ok, delta = pcall(get_text_fn, json)
+        if text_ok and type(delta) == 'string' and delta ~= '' then
+            table.insert(result, delta)
+        end
+
+        ::continue::
+    end
+
+    return result
+end
+
+local function make_stream_parser(get_text_fn, on_text)
+    local pending = ''
+
+    return function(chunk)
+        pending = pending .. (chunk or '')
+
+        local complete, rest = pending:match '^(.*\n)([^\n]*)$'
+        if not complete then
+            return
+        end
+        pending = rest
+
+        local deltas = decode_stream_lines(complete, get_text_fn)
+        if #deltas > 0 then
+            on_text(table.concat(deltas))
+        end
+    end
+end
+
+local function prepare_chat_items(items_raw, context, provider_name)
+    if not items_raw then
+        return nil
+    end
+
+    local items = common.parse_completion_items(items_raw, provider_name)
+    items = common.filter_context_sequences_in_items(items, context)
+    items = utils.trim_completion_items(items)
+
+    return items
+end
+
 local function prepare_fim_items(items, context)
     local filtered_items = common.filter_context_sequences_in_items(items, context)
     local non_empty_items = vim.tbl_filter(function(x)
@@ -18,7 +75,7 @@ local function prepare_fim_items(items, context)
     return non_empty_items
 end
 
-function M.complete_openai_base(options, context, callback)
+function M.complete_openai_base(options, context, callback, on_partial)
     local config = require('minuet').config
 
     common.terminate_all_jobs()
@@ -66,7 +123,23 @@ function M.complete_openai_base(options, context, callback)
         timestamp = timestamp,
     })
 
+    local partial_raw = ''
+    local parse_stream_chunk
+
+    if options.stream and on_partial then
+        parse_stream_chunk = make_stream_parser(M.openai_get_text_fn_stream, function(text)
+            partial_raw = partial_raw .. text
+            local items = prepare_chat_items(partial_raw, context, options.name)
+            if items and next(items) then
+                on_partial(items)
+            end
+        end)
+    end
+
     local new_job = common.start_job(config.curl_cmd, args, {
+        on_stdout = parse_stream_chunk and function(_, data)
+            parse_stream_chunk(data)
+        end or nil,
         on_exit = function(_, result)
             utils.run_event('MinuetRequestFinished', {
                 provider = provider_name,
@@ -85,16 +158,11 @@ function M.complete_openai_base(options, context, callback)
                 items_raw = utils.no_stream_decode(result, data_file, options.name, M.openai_get_text_fn_no_stream)
             end
 
-            if not items_raw then
+            local items = prepare_chat_items(items_raw, context, options.name)
+            if not items then
                 callback()
                 return
             end
-
-            local items = common.parse_completion_items(items_raw, options.name)
-
-            items = common.filter_context_sequences_in_items(items, context)
-
-            items = utils.trim_completion_items(items)
 
             callback(items)
         end,

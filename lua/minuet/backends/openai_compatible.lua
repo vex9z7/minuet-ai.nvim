@@ -30,10 +30,10 @@ If you are using Ollama, you can simply set it to 'TERM'.]],
     )
 end
 
-M.complete = function(context, callback)
+M.complete = function(context, callback, on_partial)
     local config = require('minuet').config
     local options = vim.deepcopy(config.provider_options.openai_compatible)
-    base.complete_openai_base(options, context, callback)
+    base.complete_openai_base(options, context, callback, on_partial)
 end
 
 return M
