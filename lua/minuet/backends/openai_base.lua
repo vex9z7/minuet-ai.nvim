@@ -41,19 +41,30 @@ end
 local function make_stream_parser(on_delta)
     local pending = ''
 
-    return function(chunk)
-        pending = pending .. (chunk or '')
-
-        local complete, rest = pending:match '^(.*\n)([^\n]*)$'
-        if not complete then
-            return
-        end
-        pending = rest
-
-        for _, delta in ipairs(decode_stream_lines(complete)) do
+    local function decode(text)
+        for _, delta in ipairs(decode_stream_lines(text)) do
             on_delta(delta.index, delta.text)
         end
     end
+
+    return {
+        feed = function(chunk)
+            pending = pending .. (chunk or '')
+
+            local complete, rest = pending:match '^(.*\n)([^\n]*)$'
+            if not complete then
+                return
+            end
+            pending = rest
+            decode(complete)
+        end,
+        flush = function()
+            if pending ~= '' then
+                decode(pending)
+                pending = ''
+            end
+        end,
+    }
 end
 
 local function prepare_chat_items(items_raw, context, provider_name)
@@ -158,7 +169,7 @@ function M.complete_openai_base(options, context, callback, on_partial)
 
     local new_job = common.start_job(config.curl_cmd, args, {
         on_stdout = parse_stream_chunk and function(_, data)
-            parse_stream_chunk(data)
+            parse_stream_chunk.feed(data)
         end or nil,
         on_exit = function(_, result)
             utils.run_event('MinuetRequestFinished', {
@@ -173,6 +184,10 @@ function M.complete_openai_base(options, context, callback, on_partial)
             local items_raw
 
             local items
+
+            if parse_stream_chunk then
+                parse_stream_chunk.flush()
+            end
 
             if options.stream then
                 -- Reuse the incrementally parsed stream buckets so multi-choice
