@@ -6,10 +6,6 @@ function M.openai_get_text_fn_no_stream(json)
     return json.choices[1].message.content
 end
 
-function M.openai_get_text_fn_stream(json)
-    return json.choices[1].delta.content
-end
-
 local function decode_stream_lines(text)
     local result = {}
     local lines = vim.split(text or '', '\n', { plain = true, trimempty = false })
@@ -181,8 +177,6 @@ function M.complete_openai_base(options, context, callback, on_partial)
                 timestamp = timestamp,
             })
 
-            local items_raw
-
             local items
 
             if parse_stream_chunk then
@@ -203,7 +197,8 @@ function M.complete_openai_base(options, context, callback, on_partial)
                     items = prepare_indexed_chat_items(stream_raw_by_index, context, options.name)
                 end
             else
-                items_raw = utils.no_stream_decode(result, data_file, options.name, M.openai_get_text_fn_no_stream)
+                local items_raw =
+                    utils.no_stream_decode(result, data_file, options.name, M.openai_get_text_fn_no_stream)
                 items = prepare_chat_items(items_raw, context, options.name)
             end
 

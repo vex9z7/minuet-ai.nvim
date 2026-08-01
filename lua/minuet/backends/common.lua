@@ -58,7 +58,6 @@ function M.start_job(command, args, handlers)
     ---@type vim.SystemObj?
     local job
     local stdout_chunks = {}
-    local pending_stdout = {}
     local system_opts = { text = true }
 
     if handlers.on_stdout then
@@ -72,11 +71,7 @@ function M.start_job(command, args, handlers)
             end
 
             table.insert(stdout_chunks, data)
-            if job then
-                handlers.on_stdout(job, data)
-            else
-                table.insert(pending_stdout, data)
-            end
+            handlers.on_stdout(job, data)
         end)
     end
 
@@ -108,13 +103,6 @@ function M.start_job(command, args, handlers)
 
     job = result
     M.register_job(job)
-
-    if handlers.on_stdout and #pending_stdout > 0 then
-        for _, data in ipairs(pending_stdout) do
-            handlers.on_stdout(job, data)
-        end
-        pending_stdout = {}
-    end
 
     return job
 end
