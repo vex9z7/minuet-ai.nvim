@@ -112,6 +112,10 @@ function M.complete_openai_base(options, context, callback, on_partial)
 
     local args = utils.make_curl_args(transformed_data.end_point, transformed_data.headers, data_file)
 
+    if options.stream and on_partial then
+        table.insert(args, 1, '-N')
+    end
+
     local provider_name = 'openai_compatible'
     local timestamp = os.time()
 
