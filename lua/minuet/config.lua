@@ -249,6 +249,11 @@ local M = {
         -- Whether show virtual text suggestion when the completion menu
         -- (nvim-cmp or blink-cmp) is visible.
         show_on_completion_menu = false,
+        request_indicator = {
+            enabled = true,
+            frames = { '⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏' },
+            interval = 100,
+        },
     },
     provider = 'codestral',
     -- the maximum total characters of the context before and after the cursor
