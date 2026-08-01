@@ -15,8 +15,10 @@ local internal = {
     augroup = M.augroup,
     ns_id = M.ns_id,
     extmark_id = 1,
+    indicator_extmark_id = 2,
 
     timer = nil,
+    indicator_timer = nil,
     context = {},
     is_on_throttle = false,
     current_completion_timestamp = 0,
@@ -100,6 +102,8 @@ end
 ---@field choice? integer
 ---@field shown_choices? table<string, true>
 ---@field last_pos integer[]
+---@field is_pending? boolean
+---@field indicator_frame? integer
 
 ---@param ctx minuet.VirtualtextSuggestionContext
 local function reset_ctx(ctx)
@@ -107,7 +111,13 @@ local function reset_ctx(ctx)
     ctx.choice = nil
     ctx.shown_choices = nil
     ctx.last_pos = nil
+    ctx.is_pending = nil
+    ctx.indicator_frame = nil
 end
+
+local update_preview
+local show_indicator_only
+local get_current_suggestion
 
 local function stop_timer()
     if internal.timer and not internal.timer:is_closing() then
@@ -117,12 +127,99 @@ local function stop_timer()
     end
 end
 
+local function stop_indicator()
+    if internal.indicator_timer and not internal.indicator_timer:is_closing() then
+        internal.indicator_timer:stop()
+        internal.indicator_timer:close()
+        internal.indicator_timer = nil
+    end
+end
+
+local function get_indicator(ctx)
+    if not ctx.is_pending then
+        return ''
+    end
+
+    local indicator = require('minuet').config.virtualtext.request_indicator or {}
+    if indicator.enabled == false then
+        return ''
+    end
+
+    local frames = indicator.frames or {}
+    if #frames == 0 then
+        return ''
+    end
+
+    local frame = ctx.indicator_frame or 1
+    return frames[((frame - 1) % #frames) + 1]
+end
+
+local function start_indicator(ctx)
+    local indicator = require('minuet').config.virtualtext.request_indicator or {}
+    if indicator.enabled == false then
+        return
+    end
+
+    local frames = indicator.frames or {}
+    if #frames == 0 then
+        return
+    end
+
+    stop_indicator()
+    ctx.indicator_frame = ctx.indicator_frame or 1
+    internal.indicator_timer = vim.uv.new_timer()
+    internal.indicator_timer:start(
+        indicator.interval or 100,
+        indicator.interval or 100,
+        vim.schedule_wrap(function()
+            if not ctx.is_pending then
+                stop_indicator()
+                return
+            end
+
+            ctx.indicator_frame = (ctx.indicator_frame or 1) + 1
+            update_preview(ctx)
+            if not get_current_suggestion(ctx) then
+                show_indicator_only(ctx)
+            end
+        end)
+    )
+end
+
+local function start_pending_indicator(ctx)
+    ctx.is_pending = true
+    ctx.indicator_frame = 1
+    ctx.shown_choices = ctx.shown_choices or {}
+    start_indicator(ctx)
+    show_indicator_only(ctx)
+end
+
 local function clear_preview()
     api.nvim_buf_del_extmark(0, internal.ns_id, internal.extmark_id)
+    api.nvim_buf_del_extmark(0, internal.ns_id, internal.indicator_extmark_id)
+end
+
+function show_indicator_only(ctx)
+    local indicator = get_indicator(ctx)
+    if indicator == '' then
+        return
+    end
+
+    local cursor_col = vim.fn.col '.'
+    local cursor_line = vim.fn.line '.'
+
+    api.nvim_buf_set_extmark(0, internal.ns_id, cursor_line - 1, cursor_col - 1, {
+        id = internal.indicator_extmark_id,
+        virt_text = { { indicator, 'MinuetVirtualText' } },
+        virt_text_pos = 'inline',
+        hl_mode = 'replace',
+    })
+
+    ctx.last_pos = api.nvim_win_get_cursor(0)
 end
 
 ---@param ctx? minuet.VirtualtextSuggestionContext
-local function get_current_suggestion(ctx)
+function get_current_suggestion(ctx)
     ctx = ctx or get_ctx()
 
     local ok, choice = pcall(function()
@@ -143,24 +240,35 @@ local function get_current_suggestion(ctx)
 end
 
 ---@param ctx? minuet.VirtualtextSuggestionContext
-local function update_preview(ctx)
+function update_preview(ctx)
     ctx = ctx or get_ctx()
 
     local suggestion = get_current_suggestion(ctx)
-    local display_lines = suggestion and vim.split(suggestion, '\n', { plain = true }) or {}
+    local indicator = get_indicator(ctx)
+    local display_text = suggestion
+    local display_lines = display_text and vim.split(display_text, '\n', { plain = true }) or {}
 
     clear_preview()
 
     local show_on_completion_menu = require('minuet').config.virtualtext.show_on_completion_menu
 
-    if not suggestion or #display_lines == 0 or (not show_on_completion_menu and completion_menu_visible()) then
+    if not display_text or #display_lines == 0 or (not show_on_completion_menu and completion_menu_visible()) then
+        if indicator ~= '' then
+            show_indicator_only(ctx)
+        end
         return
     end
+
+    api.nvim_buf_del_extmark(0, internal.ns_id, internal.indicator_extmark_id)
 
     local annot = ''
 
     if ctx.suggestions and #ctx.suggestions > 1 then
         annot = '(' .. ctx.choice .. '/' .. #ctx.suggestions .. ')'
+    end
+
+    if indicator ~= '' and suggestion and suggestion ~= '' then
+        annot = (#annot > 0 and (annot .. ' ') or '') .. indicator
     end
 
     local cursor_col = vim.fn.col '.'
@@ -188,7 +296,7 @@ local function update_preview(ctx)
 
     api.nvim_buf_set_extmark(0, internal.ns_id, cursor_line - 1, cursor_col - 1, extmark)
 
-    if not ctx.shown_choices[suggestion] then
+    if suggestion and ctx.shown_choices and not ctx.shown_choices[suggestion] then
         ctx.shown_choices[suggestion] = true
     end
 
@@ -199,6 +307,7 @@ end
 local function cleanup(ctx)
     ctx = ctx or get_ctx()
     stop_timer()
+    stop_indicator()
     reset_ctx(ctx)
     clear_preview()
 end
@@ -248,6 +357,9 @@ local function trigger(bufnr)
     local timestamp = uv.now()
     internal.current_completion_timestamp = timestamp
 
+    local ctx = get_ctx()
+    start_pending_indicator(ctx)
+
     local function apply_suggestions(data, is_partial)
         if timestamp ~= internal.current_completion_timestamp then
             if data and next(data) then
@@ -260,6 +372,11 @@ local function trigger(bufnr)
 
         data = utils.list_dedup(data or {})
         local ctx = get_ctx()
+
+        if not is_partial then
+            ctx.is_pending = false
+            stop_indicator()
+        end
 
         if next(data) then
             local previous_choice = ctx.choice or 1
@@ -317,6 +434,7 @@ local function schedule()
             internal.is_on_throttle = false
         end, config.throttle)
 
+        start_pending_indicator(get_ctx(bufnr))
         trigger(bufnr)
     end, config.debounce)
 end
@@ -328,6 +446,7 @@ action.next = function()
 
     -- no suggestion request yet
     if not ctx.suggestions then
+        start_pending_indicator(ctx)
         trigger(api.nvim_get_current_buf())
         return
     end
@@ -340,6 +459,7 @@ action.prev = function()
 
     -- no suggestion request yet
     if not ctx.suggestions then
+        start_pending_indicator(ctx)
         trigger(api.nvim_get_current_buf())
         return
     end
